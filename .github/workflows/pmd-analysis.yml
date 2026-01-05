@@ -1,0 +1,9 @@
+name: PMD Check
+on: [pull_request]
+jobs:
+ pmd:
+ runs-on: ubuntu-latest
+ steps:
+ - uses: actions/checkout@v4
+ - name: Placeholder Step
+ run: echo "PMD check will go here"
