@@ -36,11 +36,8 @@ private class CiCdSampleServiceTest {
         try {
             CiCdSampleService.updateAccountName(null, 'X');
             System.assert(false, 'Expected exception was not thrown.');
-        } catch (Exception e) {
-            System.assert(
-                e.getMessage().contains('accountId is required.'),
-                'Unexpected message: ' + e.getMessage()
-            );
+        } catch (IllegalArgumentException e) {
+            System.assertEquals('accountId is required.', e.getMessage());
         }
     }
 }

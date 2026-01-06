@@ -24,7 +24,8 @@ public with sharing class CiCdSampleService {
      */
     public static void updateAccountName(Id accountId, String newName) {
         if (accountId == null) {
-            throw new AuraHandledException('accountId is required.');
+            // AuraHandledException 대신 일반 예외 사용 (테스트/배포에서 메시지 안정적)
+            throw new IllegalArgumentException('accountId is required.');
         }
 
         Account a = [
