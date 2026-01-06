@@ -11,6 +11,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug auth inputs (no secrets printed)
+        shell: bash
+        run: |
+            set -euo pipefail   
+            # 비어있으면 즉시 실패
+             [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "SF_USERNAME is empty" && exit 1)
+             [ -n "${{ secrets.SF_CONSUMER_KEY }}" ] || (echo "SF_CONSUMER_KEY is empty" && exit 1)
+             [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "SF_INSTANCE_URL is empty" && exit 1)
+
+             # 형식 점검(대략)
+             case "${{ secrets.SF_INSTANCE_URL }}" in
+             https://login.salesforce.com|https://test.salesforce.com) ;;
+             *) echo "SF_INSTANCE_URL looks unusual"; exit 1 ;;
+             esac
+
+             # client-id가 보통 3MVG9로 시작하는지(대부분 그렇습니다)
+             [[ "${{ secrets.SF_CONSUMER_KEY }}" == 3MVG9* ]] || echo "SF_CONSUMER_KEY doesn't look like a Client ID (check!)"
+
+
       - name: Checkout source
         uses: actions/checkout@v4
 
