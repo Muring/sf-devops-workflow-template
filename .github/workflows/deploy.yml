@@ -21,8 +21,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ secrets.SF_JWT_KEY }}" | base64 -d > server.key
+          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
           chmod 600 server.key
+      
 
       - name: Sanity check key file
         shell: bash
