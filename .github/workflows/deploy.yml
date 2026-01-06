@@ -2,11 +2,9 @@ name: Salesforce CI/CD
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   deploy:
@@ -17,12 +15,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Salesforce CLI
+        run: npm install -g @salesforce/cli
+
+      - name: Write JWT key
+        shell: bash
         run: |
-          npm install -g @salesforce/cli
+          set -euo pipefail
+          echo "${{ secrets.SF_JWT_KEY_B64 }}" | base64 -d > server.key
+          chmod 600 server.key
+
+      - name: Sanity check key file
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl rsa -in server.key -check -noout
 
       - name: Authenticate Salesforce Org
+        shell: bash
         run: |
-          echo "${{ secrets.SF_JWT_KEY }}" > server.key
+          set -euo pipefail
           sf org login jwt \
             --username "${{ secrets.SF_USERNAME }}" \
             --client-id "${{ secrets.SF_CONSUMER_KEY }}" \
