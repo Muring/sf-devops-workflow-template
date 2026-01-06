@@ -61,17 +61,39 @@ jobs:
             --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
             --alias ci-org
 
-      - name: Validate deployment
-        run: |
-          sf project deploy validate \
-            --source-dir force-app \
-            --target-org ci-org \
-            --test-level RunLocalTests
+    #   - name: Validate deployment
+    #     run: |
+    #       sf project deploy validate \
+    #         --source-dir force-app \
+    #         --target-org ci-org \
+    #         --test-level RunLocalTests
 
-      - name: Deploy to Salesforce
-        if: github.ref == 'refs/heads/main'
+    #   - name: Deploy to Salesforce
+    #     if: github.ref == 'refs/heads/main'
+    #     run: |
+    #       sf project deploy start \
+    #         --source-dir force-app \
+    #         --target-org ci-org \
+    #         --test-level RunLocalTests
+
+      - name: Validate deployment
+        id: validate
+        shell: bash
         run: |
-          sf project deploy start \
+            set -euo pipefail
+            sf project deploy validate \
             --source-dir force-app \
             --target-org ci-org \
-            --test-level RunLocalTests
+            --test-level RunLocalTests \
+            --json > validate.json
+
+            echo "job_id=$(jq -r '.result.id' validate.json)" >> $GITHUB_OUTPUT
+
+      - name: Quick deploy to Salesforce
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+            set -euo pipefail
+            sf project deploy quick \
+            --job-id "${{ steps.validate.outputs.job_id }}" \
+            --target-org ci-org
