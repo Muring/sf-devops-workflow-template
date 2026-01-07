@@ -1,0 +1,56 @@
+name: Deploy to Production (Approved)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Deploy git ref (branch/tag/sha). Default: main"
+        required: false
+        default: "main"
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy_prod:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout (ref)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Salesforce CLI
+        run: |
+          npm i -g @salesforce/cli
+          sf --version
+
+      - name: Create JWT key file
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      - name: Auth (JWT)
+        run: |
+          sf org login jwt \
+            --client-id "${{ secrets.SF_CLIENT_ID }}" \
+            --jwt-key-file server.key \
+            --username "${{ secrets.SF_USERNAME }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+            --alias ci-prod \
+            --set-default
+
+      - name: Deploy to Production (RunLocalTests)
+        run: |
+          sf project deploy start \
+            --source-dir force-app \
+            --target-org ci-prod \
+            --test-level RunLocalTests
