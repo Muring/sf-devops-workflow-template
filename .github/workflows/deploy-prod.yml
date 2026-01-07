@@ -70,15 +70,15 @@ jobs:
       - name: Create JWT key file
         shell: bash
         run: |
-          printf '%s' "${{ secrets.SF_JWT_KEY_PROD }}" > server.key
+          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
 
       - name: Auth to Production (JWT)
         run: |
           sf org login jwt \
-            --client-id "${{ secrets.SF_CLIENT_ID_PROD }}" \
+            --client-id "${{ secrets.SF_CLIENT_ID }}" \
             --jwt-key-file server.key \
-            --username "${{ secrets.SF_USERNAME_PROD }}" \
-            --instance-url "${{ secrets.SF_INSTANCE_URL_PROD }}" \
+            --username "${{ secrets.SF_USERNAME }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
             --alias ci-prod \
             --set-default
 
