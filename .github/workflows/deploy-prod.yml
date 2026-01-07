@@ -12,6 +12,7 @@ concurrency:
 jobs:
   deploy_prod:
     runs-on: ubuntu-latest
+    environment: production
 
     steps:
       - name: Checkout (full history for tag verification)
@@ -71,6 +72,15 @@ jobs:
         shell: bash
         run: |
           printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      # 값이 비어있으면 즉시 실패하게 가드
+      - name: Guard - ensure required secrets exist
+        shell: bash
+        run: |
+          [ -n "${{ secrets.SF_CLIENT_ID }}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
+          [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "Missing SF_USERNAME" && exit 1)
+          [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+          [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
 
       - name: Auth to Production (JWT)
         run: |
