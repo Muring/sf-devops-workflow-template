@@ -1,0 +1,50 @@
+name: Deploy to Sandbox (Skip Tests)
+
+on:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: deploy-sandbox
+  cancel-in-progress: true
+
+jobs:
+  deploy_sandbox:
+    runs-on: ubuntu-latest
+    environment: sandbox
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Salesforce CLI
+        run: |
+          npm i -g @salesforce/cli
+          sf --version
+
+      - name: Create JWT key file
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      - name: Auth (JWT)
+        run: |
+          sf org login jwt \
+            --client-id "${{ secrets.SF_CLIENT_ID }}" \
+            --jwt-key-file server.key \
+            --username "${{ secrets.SF_USERNAME }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+            --alias ci-sandbox \
+            --set-default
+
+      - name: Deploy to Sandbox (NoTestRun)
+        run: |
+          sf project deploy start \
+            --source-dir force-app \
+            --target-org ci-sandbox \
+            --test-level NoTestRun
