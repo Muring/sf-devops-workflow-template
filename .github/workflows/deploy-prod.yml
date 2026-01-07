@@ -1,12 +1,9 @@
-name: Deploy to Production (Approved)
+name: Deploy to Production (Tag-based)
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Deploy git ref (branch/tag/sha). Default: main"
-        required: false
-        default: "main"
+  push:
+    tags:
+      - "prod-*"
 
 concurrency:
   group: deploy-production
@@ -15,13 +12,50 @@ concurrency:
 jobs:
   deploy_prod:
     runs-on: ubuntu-latest
-    environment: production
 
     steps:
-      - name: Checkout (ref)
+      - name: Checkout (full history for tag verification)
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      # (A) 승인자(릴리즈 권한자)만 배포 허용: github.actor allowlist
+      - name: Gate - allow only release managers
+        shell: bash
+        run: |
+          ALLOWED=("muring2" "muring3")
+          for u in "${ALLOWED[@]}"; do
+            if [ "${{ github.actor }}" = "$u" ]; then
+              echo "Actor allowed: $u"
+              exit 0
+            fi
+          done
+          echo "Actor '${{ github.actor }}' is not allowed to deploy production."
+          exit 1
+
+      # (선택 B) 서명된 태그만 허용하고 싶으면 아래 블록 사용
+      # - name: Import GPG public key (for signed tag verification)
+      #   shell: bash
+      #   run: |
+      #     # 예: 레포에 공개키 파일을 커밋해둔 경우
+      #     # .github/keys/release-publickey.asc
+      #     gpg --import .github/keys/release-publickey.asc
+      #
+      # - name: Verify signed tag
+      #   shell: bash
+      #   run: |
+      #     TAG="${GITHUB_REF_NAME}"
+      #     git verify-tag "$TAG"
+
+      - name: Ensure tag commit is on main
+        shell: bash
+        run: |
+          git fetch origin main --depth=1
+          TAG_SHA="$(git rev-list -n 1 ${{ github.ref }})"
+          if ! git merge-base --is-ancestor "$TAG_SHA" "origin/main"; then
+            echo "Tag commit is not contained in origin/main. Aborting."
+            exit 1
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -36,15 +70,15 @@ jobs:
       - name: Create JWT key file
         shell: bash
         run: |
-          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+          printf '%s' "${{ secrets.SF_JWT_KEY_PROD }}" > server.key
 
-      - name: Auth (JWT)
+      - name: Auth to Production (JWT)
         run: |
           sf org login jwt \
-            --client-id "${{ secrets.SF_CLIENT_ID }}" \
+            --client-id "${{ secrets.SF_CLIENT_ID_PROD }}" \
             --jwt-key-file server.key \
-            --username "${{ secrets.SF_USERNAME }}" \
-            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+            --username "${{ secrets.SF_USERNAME_PROD }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL_PROD }}" \
             --alias ci-prod \
             --set-default
 
@@ -54,3 +88,5 @@ jobs:
             --source-dir force-app \
             --target-org ci-prod \
             --test-level RunLocalTests
+          # 정말 "전 org 테스트"면:
+          # --test-level RunAllTestsInOrg
