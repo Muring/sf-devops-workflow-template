@@ -23,7 +23,7 @@ jobs:
       - name: Gate - allow only release managers
         shell: bash
         run: |
-          ALLOWED=("muring2" "muring3")
+          ALLOWED=("muring" "muring3")
           for u in "${ALLOWED[@]}"; do
             if [ "${{ github.actor }}" = "$u" ]; then
               echo "Actor allowed: $u"
