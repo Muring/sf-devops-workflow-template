@@ -1,8 +1,8 @@
-name: Deploy to Sandbox (Skip Tests)
+name: Deploy to Sandbox (develop push, Skip Tests)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ develop ]
 
 concurrency:
   group: deploy-sandbox
@@ -32,7 +32,15 @@ jobs:
         run: |
           printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
 
-      - name: Auth (JWT)
+      - name: Guard - ensure required secrets exist
+        shell: bash
+        run: |
+          [ -n "${{ secrets.SF_CLIENT_ID }}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
+          [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "Missing SF_USERNAME" && exit 1)
+          [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+          [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
+
+      - name: Auth to Sandbox (JWT)
         run: |
           sf org login jwt \
             --client-id "${{ secrets.SF_CLIENT_ID }}" \

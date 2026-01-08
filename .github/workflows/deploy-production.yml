@@ -1,0 +1,164 @@
+name: Production Quick Deploy (on main push) + Release
+
+on:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: quick-deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # tag push + release create
+  pull-requests: read    # PR 조회
+  issues: read           # PR 코멘트(=issue comment) 조회
+
+jobs:
+  quick_deploy_prod:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # (A) 승인자(릴리즈 권한자)만 배포 허용: github.actor allowlist
+      - name: Gate - allow only release managers
+        shell: bash
+        run: |
+          ALLOWED=("Muring" "muring3")
+          for u in "${ALLOWED[@]}"; do
+            if [ "${{ github.actor }}" = "$u" ]; then
+              echo "Actor allowed: $u"
+              exit 0
+            fi
+          done
+          echo "Actor '${{ github.actor }}' is not allowed to deploy production."
+          exit 1
+
+      - name: Find PR associated with this commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${GITHUB_SHA}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          # GitHub REST: List pull requests associated with a commit :contentReference[oaicite:7]{index=7}
+          PR_NUMBER="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number' 2>/dev/null || true)"
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No PR found for commit $SHA. Aborting."
+            exit 1
+          fi
+
+          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Read ValidatedDeployId from PR comments
+        id: job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          PR="${{ steps.pr.outputs.PR_NUMBER }}"
+
+          COMMENTS="$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body')"
+
+          # 가장 마지막에 작성된 ValidatedDeployId 라인을 사용
+          JOB_ID="$(echo "$COMMENTS" | awk '/^ValidatedDeployId:/{id=$2} END{print id}')"
+          if [ -z "$JOB_ID" ]; then
+            echo "ValidatedDeployId not found in PR comments. Aborting."
+            exit 1
+          fi
+
+          echo "JOB_ID=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Salesforce CLI
+        run: |
+          npm i -g @salesforce/cli
+          sf --version
+
+      - name: Create JWT key file
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      - name: Guard - ensure required secrets exist
+        shell: bash
+        run: |
+          [ -n "${{ secrets.SF_CLIENT_ID }}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
+          [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "Missing SF_USERNAME" && exit 1)
+          [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+          [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
+
+      - name: Auth to Production (JWT)
+        run: |
+          sf org login jwt \
+            --client-id "${{ secrets.SF_CLIENT_ID }}" \
+            --jwt-key-file server.key \
+            --username "${{ secrets.SF_USERNAME }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+            --alias ci-prod \
+            --set-default
+
+      - name: Quick Deploy to Production
+        shell: bash
+        run: |
+          sf project deploy quick \
+            --job-id "${{ steps.job.outputs.JOB_ID }}" \
+            --target-org ci-prod \
+            --wait 60
+
+      - name: Compute release tag (release-YYYY.MM.DD-SS)
+        id: reltag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          DATE=$(TZ=Asia/Seoul date +%Y.%m.%d)
+          LAST=$(git tag -l "release-${DATE}-*" | sort -V | tail -n 1 || true)
+
+          if [ -z "$LAST" ]; then
+            NEXT=1
+          else
+            SEQ=$(echo "$LAST" | awk -F- '{print $3}')
+            NEXT=$((10#$SEQ + 1))
+          fi
+
+          TAG="release-${DATE}-$(printf '%02d' $NEXT)"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create & push release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.reltag.outputs.TAG }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" -m "Release after successful production quick deploy ($TAG)"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release (generate notes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.reltag.outputs.TAG }}"
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes
