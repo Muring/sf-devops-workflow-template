@@ -28,6 +28,9 @@ public with sharing class CiCdSampleService {
             throw new IllegalArgumentException('accountId is required.');
         }
 
+        System.debug('accountId: ' + accountId);
+        System.debug('newName: ' + newName);
+
         Account a = [
             SELECT Id, Name
             FROM Account
