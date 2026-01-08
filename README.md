@@ -32,7 +32,7 @@ Salesforce(SFDX) 프로젝트를 GitHub Actions로 배포/검증하는 CI/CD 파
 ├─ force-app/                       # Salesforce metadata
 ├─ .github/
 │  ├─ workflows/
-│  │  ├─ pr-validate.yml             # PR 검증(Validate)
+│  │  ├─ validate-prod.yml           # PR 검증(Validate)
 │  │  ├─ deploy-sandbox.yml          # main → sandbox 자동 배포
 │  │  ├─ prod-validate.yml           # prod-rc-* → production validate
 │  │  └─ prod-deploy.yml             # prod-* → production quick deploy
@@ -107,7 +107,7 @@ Repository Settings → **Environments**에서 아래 2개 환경을 만든다.
 * 트리거: `pull_request` (base: `main`)
 * 동작: sandbox에 인증 후 `sf project deploy validate` 수행(테스트 포함)
 
-파일: `.github/workflows/pr-validate.yml`
+파일: `.github/workflows/validate-prod.yml`
 
 ---
 
