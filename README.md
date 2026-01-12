@@ -10,7 +10,6 @@
 * **Production 배포**: PR merge로 `main`에 반영되면 **Quick Deploy**로 빠르게 반영
 * **Release**: Production Quick Deploy가 성공하면 `release-*` 태그와 GitHub Release를 자동 생성
 
----
 
 ## 목차
 
@@ -26,7 +25,6 @@
 * [트러블슈팅](#트러블슈팅)
 * [보안/운영 팁](#보안운영-팁)
 
----
 
 ## 전체 흐름
 
@@ -59,7 +57,6 @@
   * `release-YYYY.MM.DD-SS` 태그 생성 및 push
   * GitHub Release 자동 생성(릴리즈 노트 자동 생성)
 
----
 
 ## 브랜치 전략
 
@@ -72,7 +69,6 @@
 * 필수 상태 체크: PR Validate 워크플로 통과 필수
 * PR 승인(Approvals) 조건 적용(팀 정책)
 
----
 
 ## 워크플로 파일
 
@@ -105,7 +101,6 @@ Note: This id will be used for sf project deploy quick on main merge.
   * 운영 배포 권한자 allowlist Gate
   * Quick Deploy 성공 시 `release-*` 태그 & GitHub Release 자동 생성
 
----
 
 ## 필수 설정
 
@@ -120,7 +115,6 @@ Sandbox와 Production 각각에 Connected App을 생성한다.
 * JWT 인증용 Private Key(Repository에는 커밋하지 않음)
 * Integration User(배포용 사용자) 생성 및 권한 부여
 
----
 
 ### GitHub Environments & Secrets
 
@@ -141,7 +135,6 @@ Sandbox와 Production 각각에 Connected App을 생성한다.
 
 > 워크플로에서 Environment secrets를 읽으려면 job에 `environment: <name>` 선언이 필요하다.
 
----
 
 ### Repository 설정 권장
 
@@ -158,7 +151,6 @@ Release 태그 생성 및 GitHub Release 생성을 위해 다음이 필요하다
 * Require status checks to pass
 * Require approvals (팀 정책)
 
----
 
 ## 운영 사용 방법
 
@@ -176,7 +168,6 @@ Release 태그 생성 및 GitHub Release 생성을 위해 다음이 필요하다
 4. `main`에 push가 발생하며 Production Quick Deploy 실행
 5. 성공 시 `release-*` 태그 + GitHub Release가 자동 생성
 
----
 
 ## 트러블슈팅
 
@@ -196,7 +187,6 @@ Release 태그 생성 및 GitHub Release 생성을 위해 다음이 필요하다
 * Repository Actions 토큰 권한이 read-only
 * 브랜치/태그 보호 정책과 충돌
 
----
 
 ## 보안/운영 팁
 
@@ -205,7 +195,6 @@ Release 태그 생성 및 GitHub Release 생성을 위해 다음이 필요하다
 * `.github/workflows/**` 변경은 CODEOWNERS + 브랜치 보호로 보호하는 구성이 권장된다.
 * 운영 배포 권한자(allowlist)는 최소화한다.
 
----
 
 ## 참고
 
