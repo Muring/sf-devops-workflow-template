@@ -1,254 +1,213 @@
-# Salesforce CI/CD (GitHub Actions)
+# Salesforce CI/CD (develop → main)
 
-Salesforce(SFDX) 프로젝트를 GitHub Actions로 배포/검증하는 CI/CD 파이프라인이다.
-운영(Production)은 **태그 기반 승인 + Validate → Quick Deploy** 전략으로 배포 시간을 단축하고, Sandbox는 **자주 자동 배포**되도록 구성했다.
+**Sandbox 자동 배포 + Production Validate → Quick Deploy + Release 자동 생성**
 
----
+이 저장소는 Salesforce(SFDX) 프로젝트를 GitHub Actions 기반으로 운영한다.
+개발 속도와 운영 안정성을 동시에 확보하기 위해 다음 전략을 사용한다.
 
-## 목표
-
-* **Sandbox**
-
-  * `main` 반영 시 자동 배포
-  * 빠른 피드백을 위해 기본적으로 테스트를 스킵(NoTestRun)
-
-* **Production**
-
-  * `prod-rc-*` 태그: 운영 Org에 **Validate** 수행(테스트 포함)
-  * `prod-*` 태그: Validate 결과(Job ID)를 이용해 **Quick Deploy**
-  * GitHub **Environment 보호 규칙**으로 `prod-*` 태그만 운영 배포 가능하도록 제한
-
-* **보안**
-
-  * JWT 기반 인증(`sf org login jwt`)
-  * `.github/workflows/**` 변경은 CODEOWNERS + 브랜치 보호로 변조 방지
+* **Sandbox**: `develop` 브랜치 push 시 자동 배포(테스트 스킵)
+* **Production**: `develop → main` PR에서 **Validate(테스트 포함)** 수행
+* **Production 배포**: PR merge로 `main`에 반영되면 **Quick Deploy**로 빠르게 반영
+* **Release**: Production Quick Deploy가 성공하면 `release-*` 태그와 GitHub Release를 자동 생성
 
 ---
 
-## 저장소 구조
+## 목차
+
+* [전체 흐름](#전체-흐름)
+* [브랜치 전략](#브랜치-전략)
+* [워크플로 파일](#워크플로-파일)
+* [필수 설정](#필수-설정)
+
+  * [Salesforce Connected App(JWT)](#salesforce-connected-appjwt)
+  * [GitHub Environments & Secrets](#github-environments--secrets)
+  * [Repository 설정 권장](#repository-설정-권장)
+* [운영 사용 방법](#운영-사용-방법)
+* [트러블슈팅](#트러블슈팅)
+* [보안/운영 팁](#보안운영-팁)
+
+---
+
+## 전체 흐름
+
+### 1) develop → Sandbox 자동 배포
+
+* 트리거: `push` to `develop`
+* 대상: Sandbox Org
+* 테스트: `NoTestRun`
+
+### 2) PR(develop → main) → Production Validate
+
+* 트리거: `pull_request` to `main`
+* 대상: Production Org
+* 테스트: `RunLocalTests`
+* 결과: Validate 결과의 **Job ID(ValidatedDeployId)**를 PR 코멘트로 기록
+
+### 3) main merge → Production Quick Deploy
+
+* 트리거: `push` to `main` (PR merge로 발생)
+* 동작:
+
+  1. 현재 커밋과 연결된 PR을 조회
+  2. PR 코멘트에서 `ValidatedDeployId`를 읽음
+  3. `sf project deploy quick`로 운영 반영
+
+### 4) Quick Deploy 성공 → Release 자동 생성
+
+* Production Quick Deploy 성공 시점에만:
+
+  * `release-YYYY.MM.DD-SS` 태그 생성 및 push
+  * GitHub Release 자동 생성(릴리즈 노트 자동 생성)
+
+---
+
+## 브랜치 전략
+
+* `develop`: 개발/통합 브랜치이다. 변경이 잦으므로 Sandbox 자동 배포로 빠르게 피드백을 받는다.
+* `main`: 운영 반영 브랜치이다. `develop → main` PR로만 반영한다.
+
+권장 GitHub 브랜치 보호:
+
+* `main` 직접 push 금지(PR 필수)
+* 필수 상태 체크: PR Validate 워크플로 통과 필수
+* PR 승인(Approvals) 조건 적용(팀 정책)
+
+---
+
+## 워크플로 파일
+
+### 1) Sandbox 자동 배포
+
+* 파일: `.github/workflows/deploy-sandbox.yml`
+* 트리거: `push` to `develop`
+* 환경: `environment: sandbox`
+
+### 2) PR Production Validate
+
+* 파일: `.github/workflows/pr-validate-production.yml`
+* 트리거: `pull_request` to `main`
+* 환경: `environment: production-validate`
+* PR 코멘트 예시:
 
 ```text
-.
-├─ force-app/                       # Salesforce metadata
-├─ .github/
-│  ├─ workflows/
-│  │  ├─ validate-prod.yml           # PR 검증(Validate)
-│  │  ├─ deploy-sandbox.yml          # main → sandbox 자동 배포
-│  │  ├─ prod-validate.yml           # prod-rc-* → production validate
-│  │  └─ prod-deploy.yml             # prod-* → production quick deploy
-│  └─ CODEOWNERS                     # 워크플로 변경 보호
-└─ README.md
+ValidatedDeployId: 0AfXXXXXXXXXXXX
+HeadSHA: abcdef1234...
+Note: This id will be used for sf project deploy quick on main merge.
 ```
+
+### 3) Production Quick Deploy + Release
+
+* 파일: `.github/workflows/quick-deploy-production.yml`
+* 트리거: `push` to `main`
+* 환경: `environment: production`
+* 포함 기능:
+
+  * 운영 배포 권한자 allowlist Gate
+  * Quick Deploy 성공 시 `release-*` 태그 & GitHub Release 자동 생성
 
 ---
 
-## 사전 준비
+## 필수 설정
 
-### 1) Salesforce Org 준비
+### Salesforce Connected App(JWT)
 
-* Sandbox Org 1개
-* Production Org 1개
+Sandbox와 Production 각각에 Connected App을 생성한다.
+일반적으로 Sandbox/Production의 Consumer Key는 서로 다르다.
 
-각 Org에 **Connected App**을 생성하고, JWT 인증을 위한 설정을 한다.
+필수 항목:
 
-> Sandbox와 Production의 Connected App **Consumer Key(Client Id)는 서로 다르게 발급**된다.
-> 다만 동일한 인증서(공개키)를 두 Org의 Connected App에 등록하는 방식은 가능하다.
+* Consumer Key(Client ID)
+* JWT 인증용 Private Key(Repository에는 커밋하지 않음)
+* Integration User(배포용 사용자) 생성 및 권한 부여
 
-### 2) GitHub Environments 생성
+---
 
-Repository Settings → **Environments**에서 아래 2개 환경을 만든다.
+### GitHub Environments & Secrets
+
+다음 3개 Environment를 사용한다.
 
 * `sandbox`
+* `production-validate`
 * `production`
 
----
+각 Environment에 아래 Secrets를 저장한다(키 이름 동일 권장).
 
-## Secrets 설정 (Environment Secrets)
+| Secret Key        | 설명                                                         |
+| ----------------- | ---------------------------------------------------------- |
+| `SF_CLIENT_ID`    | Connected App Consumer Key                                 |
+| `SF_USERNAME`     | 배포용 사용자 Username                                           |
+| `SF_INSTANCE_URL` | 로그인 URL (`https://test.salesforce.com` 또는 My Domain URL 등) |
+| `SF_JWT_KEY`      | JWT private key 내용(멀티라인)                                   |
 
-각 Environment에 동일한 키 이름으로 Secrets를 저장한다.
-(즉, 워크플로에서는 `secrets.SF_CLIENT_ID`처럼 **이름이 통일**된다.)
-
-### 공통 키(환경마다 값만 다름)
-
-| Key               | 설명                                                                            |
-| ----------------- | ----------------------------------------------------------------------------- |
-| `SF_CLIENT_ID`    | Connected App Consumer Key(Client Id)                                         |
-| `SF_USERNAME`     | 배포용 Salesforce Username                                                       |
-| `SF_INSTANCE_URL` | Sandbox: `https://test.salesforce.com` / Prod: `https://login.salesforce.com` |
-| `SF_JWT_KEY`      | JWT private key(문자열 전체)                                                       |
-
-> `SF_JWT_KEY`는 보통 줄바꿈 포함 텍스트이므로, GitHub Secrets에 그대로 저장한다.
+> 워크플로에서 Environment secrets를 읽으려면 job에 `environment: <name>` 선언이 필요하다.
 
 ---
 
-## GitHub Environment 보호 규칙(Production 필수)
+### Repository 설정 권장
 
-`production` Environment에서 다음을 설정한다.
+#### 1) Actions 권한
 
-### Deployment branches and tags
+Release 태그 생성 및 GitHub Release 생성을 위해 다음이 필요하다.
 
-* **Selected branches and tags**로 설정
-* 허용 규칙 추가
+* 워크플로에 `permissions: contents: write`
+* Repository Settings에서 GitHub Actions의 `GITHUB_TOKEN`이 read-only인 경우 read/write로 변경
 
-  * Branch: `main`
-  * Tag: `prod-*`
-  * Tag: `prod-rc-*` (Validate 태그도 production 환경 사용하므로 포함)
-
-이 설정이 없으면, `environment: production`을 사용하는 Job이 태그 실행 시 다음과 같은 에러로 차단될 수 있다.
-
-* `Tag "..." is not allowed to deploy to production due to environment protection rules.`
-
----
-
-## 워크플로 동작 방식
-
-### 1) PR 검증 (PR → main)
-
-* 트리거: `pull_request` (base: `main`)
-* 동작: sandbox에 인증 후 `sf project deploy validate` 수행(테스트 포함)
-
-파일: `.github/workflows/validate-prod.yml`
-
----
-
-### 2) Sandbox 자동 배포 (main push)
-
-* 트리거: `push` (branch: `main`)
-* 동작: sandbox에 `sf project deploy start` 수행
-* 기본값: `--test-level NoTestRun`
-
-파일: `.github/workflows/deploy-sandbox.yml`
-
----
-
-### 3) Production 배포 (태그 기반 승인)
-
-운영 배포는 **2단계 태그**로 수행한다.
-
-#### (1) Validate 태그: `prod-rc-YYYY.MM.DD-SS`
-
-* 트리거: 태그 push(`prod-rc-*`)
-* 동작:
-
-  * Production에 Validate 수행(테스트 포함)
-  * 결과 JSON에서 **Validated Deploy Job ID**를 추출
-  * GitHub Release(해당 rc 태그)의 body에 `ValidatedDeployId: <JOB_ID>` 형태로 저장
-
-파일: `.github/workflows/prod-validate.yml`
-
-#### (2) Deploy 태그: `prod-YYYY.MM.DD-SS`
-
-* 트리거: 태그 push(`prod-*`)
-* 동작:
-
-  * 동일 커밋에 찍힌 `prod-rc-*` 태그를 찾음
-  * RC Release body에서 `ValidatedDeployId`를 읽음
-  * `sf project deploy quick --job-id <JOB_ID>`로 Quick Deploy 수행
-  * GitHub Release 생성 시 `--generate-notes`로 릴리즈 노트 자동 생성 + 배포 메타 정보 기록
-
-파일: `.github/workflows/prod-deploy.yml`
-
----
-
-## 태그 네이밍 규칙
-
-### 권장 규칙
-
-* Validate(검증): `prod-rc-YYYY.MM.DD-SS`
-* Deploy(실배포): `prod-YYYY.MM.DD-SS`
-
-예시:
-
-* `prod-rc-2026.01.07-06`
-* `prod-2026.01.07-06`
-
-> `SS`는 동일 날짜 내 재시도/재배포를 위한 시퀀스이다.
-
----
-
-## 운영 배포 절차(실제 실행 방법)
-
-### 1) Validate 수행(업무시간 권장)
-
-```bash
-git checkout main
-git pull
-
-git tag -a prod-rc-2026.01.07-06 -m "Production validate"
-git push origin prod-rc-2026.01.07-06
-```
-
-* GitHub Actions에서 `prod-validate.yml`이 실행된다.
-* RC 태그 Release body에 `ValidatedDeployId: ...`가 기록된다.
-
-### 2) Quick Deploy 수행(배포 시간대 권장)
-
-```bash
-git checkout main
-git pull
-
-git tag -a prod-2026.01.07-06 -m "Production release"
-git push origin prod-2026.01.07-06
-```
-
-* GitHub Actions에서 `prod-deploy.yml`이 실행된다.
-* 동일 커밋의 RC 태그를 찾고, Job ID로 Quick Deploy를 수행한다.
-
----
-
-## 워크플로 변조 방지 (CODEOWNERS + Branch Protection)
-
-### 1) CODEOWNERS 파일 생성
-
-아래 위치 중 하나에 `CODEOWNERS` 파일을 둔다.
-
-* `/CODEOWNERS`
-* `/.github/CODEOWNERS`  ✅ (권장)
-* `/docs/CODEOWNERS`
-
-예시: `/.github/CODEOWNERS`
-
-```txt
-/.github/workflows/  @Muring @muring3
-/.github/CODEOWNERS  @Muring @muring3
-```
-
-### 2) main 브랜치 보호 설정(권장)
-
-Repository Settings → Branches → main 보호 규칙에서 아래를 활성화한다.
+#### 2) 브랜치 보호(main)
 
 * Require a pull request before merging
-* Require approvals (최소 1명)
-* **Require review from Code Owners**
-* Require status checks to pass (PR Validate)
-* (가능하면) Restrict who can push to matching branches
+* Require status checks to pass
+* Require approvals (팀 정책)
+
+---
+
+## 운영 사용 방법
+
+### 1) 개발/테스트(Sandbox)
+
+1. `develop` 브랜치에 커밋 push
+2. GitHub Actions가 Sandbox에 자동 배포
+3. Sandbox에서 기능 확인
+
+### 2) 운영 반영(Production)
+
+1. `develop` → `main` PR 생성
+2. PR Validate(Production Validate)가 실행되어 테스트 포함 검증 수행
+3. Validate 성공 후 PR 승인 및 merge
+4. `main`에 push가 발생하며 Production Quick Deploy 실행
+5. 성공 시 `release-*` 태그 + GitHub Release가 자동 생성
 
 ---
 
 ## 트러블슈팅
 
-### `Parsing --instance-url Expected a valid url but received:`
+### 1) Quick Deploy가 “PR을 못 찾는다”
 
-* 원인: `SF_INSTANCE_URL`이 빈 값으로 전달됨(Secrets 미주입)
-* 해결:
+* main에 직접 push했거나, 커밋이 PR merge로 생성되지 않은 경우이다.
+* 운영 정책상 main 직접 push를 막는 것이 권장이다.
 
-  * Job에 `environment: production` / `environment: sandbox`가 선언되어 있는지 확인
-  * 해당 Environment에 `SF_INSTANCE_URL`이 존재하는지 확인
-  * 값에 공백/따옴표가 섞이지 않았는지 확인
+### 2) Quick Deploy가 “ValidatedDeployId를 못 찾는다”
 
-### `Tag "...” is not allowed to deploy to production due to environment protection rules.`
+* PR Validate 워크플로가 실행되지 않았거나 실패했을 가능성이 높다.
+* PR 코멘트가 삭제되었거나, 코멘트 형식이 바뀐 경우에도 발생한다.
 
-* 원인: production Environment의 “허용된 태그 패턴”에 현재 태그가 포함되지 않음
-* 해결:
+### 3) Tag push / Release 생성이 실패한다
 
-  * `prod-*`, `prod-rc-*`가 모두 허용되도록 Deployment branches and tags를 설정
+* `permissions: contents: write` 누락
+* Repository Actions 토큰 권한이 read-only
+* 브랜치/태그 보호 정책과 충돌
+
+---
+
+## 보안/운영 팁
+
+* JWT private key는 절대 저장소에 커밋하지 않는다.
+* 배포용 사용자는 최소 권한 원칙을 적용한다.
+* `.github/workflows/**` 변경은 CODEOWNERS + 브랜치 보호로 보호하는 구성이 권장된다.
+* 운영 배포 권한자(allowlist)는 최소화한다.
 
 ---
 
 ## 참고
 
-* Salesforce CLI: `sf org login jwt`, `sf project deploy validate`, `sf project deploy quick`
-* GitHub Environments: secrets 및 tag/branch 기반 배포 제한
-* GitHub CODEOWNERS + branch protection: 워크플로 변경 승인 강제
-
----
+* Salesforce CLI를 사용하여 `deploy validate`로 검증한 결과(Job ID)를 `deploy quick`에서 재사용한다.
+* Release는 “운영 반영 성공 기록”으로 취급한다. Quick Deploy 성공 시점에만 생성된다.
