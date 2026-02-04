@@ -1,58 +1,144 @@
-name: Deploy to Sandbox (develop push, Skip Tests)
+name: Sandbox Quick Deploy (on develop push)
 
 on:
-  push:
-    branches: [ develop ]
+    push:
+        branches: [develop]
+        paths-ignore:
+            - 'sfdx-project.json'
+            - 'README.md'
 
 concurrency:
-  group: deploy-sandbox
-  cancel-in-progress: true
+    group: quick-deploy-sandbox
+    cancel-in-progress: false
+
+permissions:
+    contents: write # tag push + release create
+    pull-requests: read # PR 조회
+    issues: read # PR 코멘트(=issue comment) 조회
 
 jobs:
-  deploy_sandbox:
-    runs-on: ubuntu-latest
-    environment: sandbox
+    quick_deploy_sandbox:
+        runs-on: ubuntu-latest
+        environment: sandbox
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+        steps:
+            - name: Checkout (full history)
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+            # (A) 승인자(릴리즈 권한자)만 배포 허용: github.actor allowlist
+            - name: Gate - allow only release managers
+              shell: bash
+              run: |
+                  ALLOWED=("Muring" "muring3")
+                  for u in "${ALLOWED[@]}"; do
+                    if [ "${{ github.actor }}" = "$u" ]; then
+                      echo "Actor allowed: $u"
+                      exit 0
+                    fi
+                  done
+                  echo "Actor '${{ github.actor }}' is not allowed to deploy sandbox."
+                  exit 1
 
-      - name: Install Salesforce CLI
-        run: |
-          npm i -g @salesforce/cli
-          sf --version
+            - name: Find PR associated with this commit
+              id: pr
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  SHA="${GITHUB_SHA}"
+                  REPO="${GITHUB_REPOSITORY}"
 
-      - name: Create JWT key file
-        shell: bash
-        run: |
-          printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+                  # GitHub REST: List pull requests associated with a commit
+                  PR_NUMBER="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number' 2>/dev/null || true)"
+                  if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+                    echo "No PR found for commit $SHA. Aborting."
+                    exit 1
+                  fi
 
-      - name: Guard - ensure required secrets exist
-        shell: bash
-        run: |
-          [ -n "${{ secrets.SF_CLIENT_ID }}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
-          [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "Missing SF_USERNAME" && exit 1)
-          [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
-          [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
+                  echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-      - name: Auth to Sandbox (JWT)
-        run: |
-          sf org login jwt \
-            --client-id "${{ secrets.SF_CLIENT_ID }}" \
-            --jwt-key-file server.key \
-            --username "${{ secrets.SF_USERNAME }}" \
-            --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
-            --alias ci-sandbox \
-            --set-default
+            - name: Read ValidatedDeployId from PR comments
+              id: job
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  REPO="${GITHUB_REPOSITORY}"
+                  PR="${{ steps.pr.outputs.PR_NUMBER }}"
 
-      - name: Deploy to Sandbox (NoTestRun)
-        run: |
-          sf project deploy start \
-            --source-dir force-app \
-            --target-org ci-sandbox \
-            --test-level NoTestRun
+                  COMMENTS="$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body')"
+
+                  JOB_ID="$(echo "$COMMENTS" | awk '/^ValidatedDeployId:/{id=$2} END{print id}')"
+                  if [ -z "$JOB_ID" ]; then
+                    echo "ValidatedDeployId not found in PR comments. Aborting."
+                    exit 1
+                  fi
+
+                  echo "JOB_ID=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+            - name: Skip when no metadata changes
+              if: ${{ steps.job.outputs.JOB_ID == 'SKIPPED' }}
+              shell: bash
+              run: |
+                  echo "No metadata changes detected in validation. Skipping quick deploy."
+                  exit 0
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Install Salesforce CLI
+              run: |
+                  npm i -g @salesforce/cli
+                  sf --version
+
+            - name: Create JWT key file
+              shell: bash
+              run: |
+                  printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+            - name: Guard - ensure required secrets exist
+              shell: bash
+              run: |
+                  [ -n "${{ secrets.SF_CLIENT_ID }}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
+                  [ -n "${{ secrets.SF_USERNAME }}" ] || (echo "Missing SF_USERNAME" && exit 1)
+                  [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+                  [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
+
+            - name: Auth to Sandbox (JWT)
+              run: |
+                  sf org login jwt \
+                    --client-id "${{ secrets.SF_CLIENT_ID }}" \
+                    --jwt-key-file server.key \
+                    --username "${{ secrets.SF_USERNAME }}" \
+                    --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+                    --alias ci-sandbox \
+                    --set-default
+
+            - name: Diagnose - check validation job is quick-deployable
+              if: ${{ steps.job.outputs.JOB_ID != 'SKIPPED' }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  JOB_ID="${{ steps.job.outputs.JOB_ID }}"
+                  echo "JOB_ID=$JOB_ID"
+
+                  REP="$(sf project deploy report --job-id "$JOB_ID" --target-org ci-sandbox --json)"
+                  echo "$REP" | jq .
+
+                  STATUS="$(echo "$REP" | jq -r '.result.status // empty')"
+                  echo "status=$STATUS"
+
+            - name: Quick Deploy to Sandbox
+              shell: bash
+              if: ${{ steps.job.outputs.JOB_ID != 'SKIPPED' }}
+              run: |
+                  sf project deploy quick \
+                    --job-id "${{ steps.job.outputs.JOB_ID }}" \
+                    --target-org ci-sandbox \
+                    --wait 60

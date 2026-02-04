@@ -1,0 +1,310 @@
+name: PR Validate (main/develop)
+
+on:
+    pull_request:
+        branches: [main, develop]
+
+concurrency:
+    group: pr-validate-integration-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+    pull-requests: write
+    security-events: write # SARIF 업로드용
+    actions: read # PR body 조회용
+
+defaults:
+    run:
+        shell: bash # bash 고정(배열/[[ ]] 안전)
+
+jobs:
+    validate_pull_request:
+        runs-on: ubuntu-latest
+        environment: ${{ github.base_ref == 'main' && 'production-validate' || 'sandbox-validate' }}
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Install Salesforce CLI
+              run: |
+                  npm i -g @salesforce/cli
+                  sf --version
+
+            - name: Install sfdx-git-delta plugin
+              run: echo y | sf plugins install sfdx-git-delta
+
+            - name: Select target org by base branch
+              run: |
+                  set -euo pipefail
+                  if [ "${{ github.base_ref }}" = "main" ]; then
+                    echo "ORG_ALIAS=ci-prod" >> "$GITHUB_ENV"
+                    echo "SF_CLIENT_ID=${{ secrets.SF_CLIENT_ID }}" >> "$GITHUB_ENV"
+                    echo "SF_USERNAME=${{ secrets.SF_USERNAME }}" >> "$GITHUB_ENV"
+                    echo "SF_INSTANCE_URL=${{ secrets.SF_INSTANCE_URL }}" >> "$GITHUB_ENV"
+                  elif [ "${{ github.base_ref }}" = "develop" ]; then
+                    echo "ORG_ALIAS=ci-sandbox" >> "$GITHUB_ENV"
+                    echo "SF_CLIENT_ID=${{ secrets.SF_SANDBOX_CLIENT_ID }}" >> "$GITHUB_ENV"
+                    echo "SF_USERNAME=${{ secrets.SF_SANDBOX_USERNAME }}" >> "$GITHUB_ENV"
+                    echo "SF_INSTANCE_URL=${{ secrets.SF_SANDBOX_INSTANCE_URL }}" >> "$GITHUB_ENV"
+                  else
+                    echo "Unsupported base branch: ${{ github.base_ref }}"
+                    exit 1
+                  fi
+
+            # (패치) Scanner용 Java 설치
+            # - name: Setup Java (for SFDX Scanner)
+            #   uses: actions/setup-java@v4
+            #   with:
+            #       distribution: temurin
+            #       java-version: '17'
+
+            # (패치) SFDX Scanner 플러그인 설치
+            # - name: Install SFDX Scanner
+            #   run: echo y | sf plugins install @salesforce/sfdx-scanner
+
+            - name: Create JWT key file
+              run: |
+                  printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+            - name: Guard - ensure required secrets exist
+              run: |
+                  set -euo pipefail
+                  [ -n "${SF_CLIENT_ID}" ] || (echo "Missing SF_CLIENT_ID" && exit 1)
+                  [ -n "${SF_USERNAME}" ] || (echo "Missing SF_USERNAME" && exit 1)
+                  [ -n "${SF_INSTANCE_URL}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+                  [ -n "${{ secrets.SF_JWT_KEY }}" ] || (echo "Missing SF_JWT_KEY" && exit 1)
+
+            - name: Auth to Target Org (JWT)
+              run: |
+                  sf org login jwt \
+                    --client-id "${SF_CLIENT_ID}" \
+                    --jwt-key-file server.key \
+                    --username "${SF_USERNAME}" \
+                    --instance-url "${SF_INSTANCE_URL}" \
+                    --alias "${ORG_ALIAS}" \
+                    --set-default
+
+            - name: Build delta package (PR base -> head)
+              id: delta
+              run: |
+                  set -euo pipefail
+                  FROM_SHA="${{ github.event.pull_request.base.sha }}"
+                  TO_SHA="${{ github.event.pull_request.head.sha }}"
+
+                  echo "FROM_SHA=$FROM_SHA"
+                  echo "TO_SHA=$TO_SHA"
+
+                  if [ -z "$FROM_SHA" ] || [ -z "$TO_SHA" ]; then
+                    echo "Missing base/head SHA. Treating as no-op (no delta)."
+                    echo "HAS_CHANGES=false" >> "$GITHUB_OUTPUT"
+                    echo "HAS_DESTRUCTIVE=false" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  rm -rf delta
+                  mkdir -p delta
+
+                  sf sgd source delta \
+                    --from "$FROM_SHA" \
+                    --to "$TO_SHA" \
+                    --output-dir "delta" \
+                    --source-dir "force-app" \
+                    --generate-delta
+
+                  MANIFEST="delta/package/package.xml"
+                  DC_DIR="delta/destructiveChanges"
+                  DC="delta/destructiveChanges/destructiveChanges.xml"
+                  SRC_DIR="delta/force-app"
+
+                  echo "=== delta tree ==="
+                  ls -R delta || true
+
+                  if [ -f "$MANIFEST" ] && grep -q "<members>" "$MANIFEST"; then
+                    echo "HAS_CHANGES=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "HAS_CHANGES=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  if [ -f "$DC" ] && grep -q "<members>" "$DC"; then
+                    echo "HAS_DESTRUCTIVE=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "HAS_DESTRUCTIVE=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  echo "MANIFEST=$MANIFEST" >> "$GITHUB_OUTPUT"
+                  echo "DC=$DC" >> "$GITHUB_OUTPUT"
+                  echo "DC_DIR=$DC_DIR" >> "$GITHUB_OUTPUT"
+                  echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_OUTPUT"
+
+            - name: Extract tests from PR body
+              id: tests
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  BODY="${{ github.event.pull_request.body }}"
+
+                  # 규칙 예시:
+                  # Apex::[MyTest1,MyTest2]::Apex  -> RunSpecifiedTests
+                  # Apex::[all]::Apex             -> RunLocalTests
+                  #
+                  # 대괄호 안을 뽑아서 공백 제거
+                  TESTS="$(echo "$BODY" | sed -n 's/.*Apex::\[\(.*\)\]::Apex.*/\1/p' | tr -d '[:space:]')"
+
+                  if [ -z "$TESTS" ]; then
+                  echo "APEX_TESTS=all" >> "$GITHUB_OUTPUT"
+                  else
+                  echo "APEX_TESTS=$TESTS" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  echo "APEX_TESTS=${TESTS:-all}"
+
+            # Scanner 실행: delta로 생성된 소스만
+            # - name: Run SFDX Scanner (delta only)
+            #   if: ${{ steps.delta.outputs.HAS_CHANGES == 'true' }}
+            #   run: |
+            #       set -euo pipefail
+
+            #       SRC_DIR="${{ steps.delta.outputs.SRC_DIR }}"
+            #       if [ ! -d "$SRC_DIR" ]; then
+            #         echo "Delta source dir not found ($SRC_DIR). Fallback to repo force-app."
+            #         SRC_DIR="force-app"
+            #       fi
+
+            #       # Apex 중심 스캔(필요하면 category 조정 가능)
+            #       sf scanner run \
+            #         --format sarif \
+            #         --target "$SRC_DIR/**/*.cls,$SRC_DIR/**/*.trigger" \
+            #         --category "Design,Best Practices,Performance" \
+            #         --outfile "scanner-results.sarif" || true
+
+            #       ls -la scanner-results.sarif || true
+
+            # (패치) SARIF 업로드
+            # - name: Upload SARIF file
+            #   if: ${{ hashFiles('scanner-results.sarif') != '' }}
+            #   uses: github/codeql-action/upload-sarif@v3
+            #   with:
+            #       sarif_file: scanner-results.sarif
+
+            # # (패치) destructive 변경이 있으면 mdapi checkonly로 별도 검증
+            # - name: Validate destructive changes (mdapi checkonly)
+            #   if: ${{ steps.delta.outputs.HAS_DESTRUCTIVE == 'true' }}
+            #   run: |
+            #       set -euo pipefail
+            #       sf force mdapi deploy \
+            #         --deploydir "${{ steps.delta.outputs.DC_DIR }}" \
+            #         --target-org ci-prod \
+            #         --checkonly \
+            #         --ignorewarnings
+
+            - name: (Optional) Print org info for verification
+              run: |
+                  set -euo pipefail
+                  sf org display --target-org "${ORG_ALIAS}" --json | jq '.result.instanceUrl, .result.orgId, .result.username'
+
+            - name: Validate deployment and wait until Succeeded
+              id: validate
+              shell: bash
+              if: ${{ steps.delta.outputs.HAS_CHANGES == 'true' || steps.delta.outputs.HAS_DESTRUCTIVE == 'true' }}
+              run: |
+                  set -euo pipefail
+
+                  MANIFEST="delta/package/package.xml"
+                  if [ ! -f "$MANIFEST" ]; then
+                    echo "Manifest not found at $MANIFEST"
+                    ls -R delta || true
+                    exit 1
+                  fi
+
+                  EXTRA=()
+                  if [ "${{ steps.delta.outputs.HAS_DESTRUCTIVE }}" = "true" ] && [ -f "delta/destructiveChanges/destructiveChanges.xml" ]; then
+                    EXTRA+=(--post-destructive-changes "delta/destructiveChanges/destructiveChanges.xml")
+                  fi
+
+                  APEX_TESTS="${{ steps.tests.outputs.APEX_TESTS }}"
+
+                  # 기본은 all → RunLocalTests
+                  if [ -z "$APEX_TESTS" ] || [ "$APEX_TESTS" = "all" ]; then
+                    TEST_ARGS=(--test-level RunLocalTests)
+                  else
+                    # RunSpecifiedTests는 --tests 로 테스트 클래스 지정
+                    # (콤마 구분 문자열 그대로 전달)
+                    TEST_ARGS=(--test-level RunSpecifiedTests --tests "$APEX_TESTS")
+                  fi
+
+                  set +e
+                  OUT="$(sf project deploy validate \
+                  --manifest "$MANIFEST" \
+                  --target-org "${ORG_ALIAS}" \
+                  --wait 1 \
+                  --json \
+                  "${TEST_ARGS[@]}" \
+                  "${EXTRA[@]}" 2>&1)"
+                  RC=$?
+                  set -e
+
+                  echo "$OUT"
+                  echo "$OUT" | jq . || true
+
+                  if [ $RC -ne 0 ]; then
+                    echo "Validate command failed before we could poll."
+                    exit 1
+                  fi
+
+                  JOB_ID="$(echo "$OUT" | jq -r '.result.id // empty')"
+                  if [ -z "$JOB_ID" ]; then
+                    echo "Failed to extract validation job id."
+                    exit 1
+                  fi
+
+                  echo "JOB_ID=$JOB_ID" >> "$GITHUB_OUTPUT"
+
+                  for i in {1..120}; do
+                    REP="$(sf project deploy report --job-id "$JOB_ID" --target-org "${ORG_ALIAS}" --json)"
+                    STATUS="$(echo "$REP" | jq -r '.result.status // empty')"
+                    echo "Validation status=$STATUS (try=$i)"
+
+                    if [ "$STATUS" = "Succeeded" ]; then break; fi
+                    if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Canceled" ]; then
+                      echo "$REP" | jq .
+                      exit 1
+                    fi
+                    sleep 30
+                  done
+
+                  REP="$(sf project deploy report --job-id "$JOB_ID" --target-org "${ORG_ALIAS}" --json)"
+                  STATUS="$(echo "$REP" | jq -r '.result.status // empty')"
+                  echo "$REP" | jq .
+
+                  if [ "$STATUS" != "Succeeded" ]; then
+                    echo "Validation did not reach Succeeded. Current status: $STATUS"
+                    exit 1
+                  fi
+
+            - name: Comment validation result to PR
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  PR="${{ github.event.pull_request.number }}"
+                  JOB_ID="${{ steps.validate.outputs.JOB_ID }}"
+                  HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+                  JOB_ID="$(echo "$JOB_ID" | tr -d '\r\n ' )"
+                  if [ -z "$JOB_ID" ]; then
+                    JOB_ID="SKIPPED"
+                  fi
+
+                  BODY="$(printf "ValidatedDeployId: %s\nHeadSHA: %s\nNote: This id will be used for sf project deploy quick on main merge.\n" \
+                    "$JOB_ID" "$HEAD_SHA")"
+
+                  gh pr comment "$PR" --body "$BODY"
