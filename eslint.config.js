@@ -1,66 +1,55 @@
-// eslint.config.js
+const { defineConfig } = require('eslint/config');
+const eslintJs = require('@eslint/js');
+const jestPlugin = require('eslint-plugin-jest');
+const auraConfig = require('@salesforce/eslint-plugin-aura');
+const lwcConfig = require('@salesforce/eslint-config-lwc/recommended');
+const globals = require('globals');
 
-import { FlatCompat } from "@eslint/eslintrc";
-import importPlugin from "eslint-plugin-import";
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({
-    baseDirectory: __dirname,
-});
-
-const eslintConfig = [
-    ...compat.extends("next/core-web-vitals", "next/typescript"),
+module.exports = defineConfig([
+    // Aura configuration
     {
-        plugins: {
-            import: importPlugin,
-        },
+        files: ['**/aura/**/*.js'],
+        extends: [
+            ...auraConfig.configs.recommended,
+            ...auraConfig.configs.locker
+        ]
+    },
+
+    // LWC configuration
+    {
+        files: ['**/lwc/**/*.js'],
+        extends: [lwcConfig]
+    },
+
+    // LWC configuration with override for LWC test files
+    {
+        files: ['**/lwc/**/*.test.js'],
+        extends: [lwcConfig],
         rules: {
-            "@typescript-eslint/no-explicit-any": ["error"],
-            '@typescript-eslint/no-require-imports': 'off',
-            'react-hooks/exhaustive-deps': 'off',
-            "@next/next/no-img-element": "off", // <img/> 태그 허용
-            "import/order": [
-                "error",
-                {
-                    groups: [
-                        ["builtin", "external"],
-                        ["internal"],
-                        ["parent", "sibling", "index"],
-                    ],
-                    pathGroups: [
-                        {pattern: "next/**", group: "builtin", position: "before"},
-                        {pattern: "react", group: "external", position: "before"},
-                        { pattern: "@/app/api/**", group: "internal", position: "before" },
-                        { pattern: "@/libs/**", group: "internal", position: "before" },
-                        { pattern: "@/actions/**", group: "internal", position: "before" },
-                        { pattern: "@/hooks/**", group: "internal", position: "before" },
-                        { pattern: "@/interfaces/**", group: "internal", position: "after" },
-                        { pattern: "@/types/**", group: "internal", position: "after" },
-                        { pattern: "@/layouts/**", group: "internal", position: "after" },
-                        { pattern: "@/components/**", group: "internal", position: "after" },
-                        { pattern: "@/assets/**", group: "internal", position: "after" },
-                        { pattern: "@/styles/**", group: "internal", position: "after" },
-                        { pattern: "@/**", group: "internal", position: "after" },
-                    ],
-                    pathGroupsExcludedImportTypes: ["react"],
-                    alphabetize: {
-                        order: "asc",
-                        caseInsensitive: true,
-                    },
-                    "newlines-between": "never",
-                },
-            ],
+            '@lwc/lwc/no-unexpected-wire-adapter-usages': 'off'
         },
+        languageOptions: {
+            globals: {
+                ...globals.node
+            }
+        }
     },
-    {
-        ignores: [
-            "src/components/ui/*",
-        ],
-    },
-];
 
-export default eslintConfig;
+    // Jest mocks configuration
+    {
+        files: ['**/jest-mocks/**/*.js'],
+        languageOptions: {
+            sourceType: 'module',
+            ecmaVersion: 'latest',
+            globals: {
+                ...globals.node,
+                ...globals.es2021,
+                ...jestPlugin.environments.globals.globals
+            }
+        },
+        plugins: {
+            eslintJs
+        },
+        extends: ['eslintJs/recommended']
+    }
+]);
