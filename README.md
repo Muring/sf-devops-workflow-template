@@ -110,10 +110,6 @@ Salesforce 메타데이터 배포는 일반적인 애플리케이션 배포와 �
 > **사전 준비(필수)**  
 > 이 Workflow는 **Salesforce Connected App(JWT) 설정**과 **GitHub Secrets/Environments 구성**이 **이미 완료되어 있어야** 정상 동작합니다.  
 > 아직 설정하지 않았다면, [기본 설정 가이드](https://muring-blog.vercel.app/salesforce-ci-cd-basic)를 먼저 완료한 뒤 본 Workflow를 사용하십시오.
->
-> ```text
-> 
-> ```
 
 
 ### 4.1 GitHub Environments
