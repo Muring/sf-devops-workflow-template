@@ -136,6 +136,7 @@ GitHub Environments를 사용하는 이유:
 - `SF_USERNAME` : JWT 인증 대상 사용자(Integration User)
 - `SF_INSTANCE_URL` : 로그인 URL (예: `https://login.salesforce.com` 또는 Sandbox URL)
 - `SF_JWT_KEY` : JWT Private Key (멀티라인 문자열)
+- `ORG_ALIAS` : org의 별칭 (ci-sandbox | ci-prod)
 
 > JWT 기반 인증은 `sf org login jwt`(또는 `sf org login jwt`)로 수행하며,  
 > CI 환경에서 브라우저 로그인 없이 안정적으로 인증할 수 있다는 장점이 있습니다.
@@ -185,7 +186,7 @@ permissions:
 ### 5.2 환경 선택: base 브랜치에 따라 검증 대상 Org 전환
 
 ```yml
-environment: ${{ github.base_ref == 'main' && 'production-validate' || 'sandbox-validate' }}
+environment: ${{ github.base_ref == 'main' && 'production-validate' || github.base_ref == 'develop' && 'sandbox-validate' || 'unsupported' }}
 ```
 
 - PR의 base 브랜치가 `main`이면 **Production 검증 Org(또는 Production 자체)** 를 사용
