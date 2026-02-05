@@ -128,7 +128,7 @@ GitHub Environments를 사용하는 이유:
 - Production에는 추가 승인(Required reviewers) 같은 정책을 적용할 수 있음
 - 배포 대상과 검증 대상을 명확히 구분할 수 있음
 
-### 4.2 필수 Secrets
+### 4.2 필수 Secrets & Vars
 
 각 Environment에 다음 Secret이 존재해야 합니다(Workflow에서 Guard로 체크합니다).
 
@@ -136,6 +136,8 @@ GitHub Environments를 사용하는 이유:
 - `SF_USERNAME` : JWT 인증 대상 사용자(Integration User)
 - `SF_INSTANCE_URL` : 로그인 URL (예: `https://login.salesforce.com` 또는 Sandbox URL)
 - `SF_JWT_KEY` : JWT Private Key (멀티라인 문자열)
+
+각 Environment에 다음 Var이 존재해야 합니다(Workflow에서 Guard로 체크합니다).
 - `ORG_ALIAS` : org의 별칭 (ci-sandbox | ci-prod)
 
 > JWT 기반 인증은 `sf org login jwt`(또는 `sf org login jwt`)로 수행하며,  
