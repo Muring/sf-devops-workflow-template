@@ -1,0 +1,17 @@
+[ Sandbox Environment ]
+
+SF_INSTANCE_URL: test.salesforce.com
+SF_USERNAME: testshin@trial.com.cnx.dev1
+SF_CLIENT_ID: OAuth Consumer Key]
+ORG_ALIAS: ci-sandbox
+
+
+[ Production Environment ]
+
+SF_INSTANCE_URL: login.salesforce.com
+SF_USERNAME: testshin@trial.com.cnx
+SF_CLIENT_ID: [OAuth Consumer Key]
+ORG_ALIAS: ci-prod
+
+[ Common Environment Variables ]
+SF_JWT_KEY: JWT Private Key (멀티라인 문자열)
