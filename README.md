@@ -110,10 +110,6 @@ Salesforce 메타데이터 배포는 일반적인 애플리케이션 배포와 �
 > **사전 준비(필수)**  
 > 이 Workflow는 **Salesforce Connected App(JWT) 설정**과 **GitHub Secrets/Environments 구성**이 **이미 완료되어 있어야** 정상 동작합니다.  
 > 아직 설정하지 않았다면, [기본 설정 가이드](https://muring-blog.vercel.app/salesforce-ci-cd-basic)를 먼저 완료한 뒤 본 Workflow를 사용하십시오.
->
-> ```text
-> 
-> ```
 
 
 ### 4.1 GitHub Environments
@@ -132,7 +128,7 @@ GitHub Environments를 사용하는 이유:
 - Production에는 추가 승인(Required reviewers) 같은 정책을 적용할 수 있음
 - 배포 대상과 검증 대상을 명확히 구분할 수 있음
 
-### 4.2 필수 Secrets
+### 4.2 필수 Secrets & Vars
 
 각 Environment에 다음 Secret이 존재해야 합니다(Workflow에서 Guard로 체크합니다).
 
@@ -140,6 +136,9 @@ GitHub Environments를 사용하는 이유:
 - `SF_USERNAME` : JWT 인증 대상 사용자(Integration User)
 - `SF_INSTANCE_URL` : 로그인 URL (예: `https://login.salesforce.com` 또는 Sandbox URL)
 - `SF_JWT_KEY` : JWT Private Key (멀티라인 문자열)
+
+각 Environment에 다음 Var이 존재해야 합니다(Workflow에서 Guard로 체크합니다).
+- `ORG_ALIAS` : org의 별칭 (ci-sandbox | ci-prod)
 
 > JWT 기반 인증은 `sf org login jwt`(또는 `sf org login jwt`)로 수행하며,  
 > CI 환경에서 브라우저 로그인 없이 안정적으로 인증할 수 있다는 장점이 있습니다.
@@ -189,7 +188,7 @@ permissions:
 ### 5.2 환경 선택: base 브랜치에 따라 검증 대상 Org 전환
 
 ```yml
-environment: ${{ github.base_ref == 'main' && 'production-validate' || 'sandbox-validate' }}
+environment: ${{ github.base_ref == 'main' && 'production-validate' || github.base_ref == 'develop' && 'sandbox-validate' || 'unsupported' }}
 ```
 
 - PR의 base 브랜치가 `main`이면 **Production 검증 Org(또는 Production 자체)** 를 사용
@@ -330,18 +329,30 @@ if [ "${{ github.actor }}" = "$u" ]; then ...
 
 ### 6.3 “이 커밋이 어떤 PR에서 왔는지” 찾기
 
-Quick Deploy는 PR 검증 결과(job id)를 사용해야 합니다.  
-하지만 develop push 이벤트는 PR 정보를 직접 제공하지 않습니다.
+Quick Deploy는 PR 검증 결과(job id)를 사용해야 합니다.
+하지만 develop push 이벤트는 PR 정보를 직접 제공하지 않으므로, push된 커밋이 어떤 PR merge 결과인지를 역으로 찾아야 합니다.
 
-그래서 아래처럼 현재 커밋 SHA로 연결된 PR을 찾습니다.
+기존에는 GitHub API에서 커밋과 연결된 PR 목록을 조회한 뒤 첫 번째 항목을 사용하는 방식이었으나,
+여러 PR이 동시에 존재하거나, 커밋 ↔ PR 매핑이 불안정한 상황(squash/rebase/중복 커밋 등) 에서 다른 PR을 집어오는 문제가 발생할 수 있습니다.
+
+따라서 본 Workflow는 아래 우선순위로 PR 번호를 결정합니다.
+
+merge commit 메시지에서 PR 번호 파싱 (가장 안정적, Merge pull request #123 / (#123) 형태)
+
+위 방식으로 찾지 못한 경우에 한해, GitHub API(commits → pulls) 조회를 fallback으로 사용
+
+이때도 base 브랜치가 develop인 PR만 필터링하여 선택
+
+이 방식은 “이번 push가 어떤 PR merge의 결과인지”를 더 안정적으로 결정하여,
+잘못된 PR의 ValidatedDeployId를 읽어 배포가 꼬이는 문제를 방지합니다.
+
+(예시)
 
 ```bash
-PR_NUMBER="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number' ...)"
+MSG="$(git log -1 --pretty=%B "$SHA")"
+# 1) 메시지에서 PR 번호 파싱
+# 2) 실패 시 commits/$SHA/pulls API로 fallback (base.ref == develop 필터)
 ```
-
-- GitHub API로 “해당 커밋과 연결된 PR 목록”을 가져오고,
-- 첫 번째 PR 번호를 사용합니다.
-- PR을 찾지 못하면 실패 처리하여 “무근본 배포”를 막습니다.
 
 ### 6.4 PR 코멘트에서 ValidatedDeployId 읽기
 
@@ -408,11 +419,19 @@ Production은 특히 강력히 권장되는 정책입니다.
 
 ### 7.3 PR 찾기 → ValidatedDeployId 읽기 → SKIPPED 처리
 
-Sandbox와 100% 동일한 패턴입니다.
+Production도 Sandbox와 동일하게 PR 검증 결과(job id)를 재사용하여 Quick Deploy를 수행합니다.
+다만 main push 이벤트에서 PR 정보를 직접 얻을 수 없기 때문에, 이번 push가 어떤 PR merge의 결과인지를 먼저 찾아야 합니다.
 
-- 커밋으로 PR 찾기
-- PR 코멘트에서 ValidatedDeployId 추출(최신)
-- SKIPPED면 배포/릴리즈 생성까지 모두 스킵
+본 Workflow는 PR 번호를 아래 우선순위로 결정합니다.
+
+merge commit 메시지에서 PR 번호 파싱 (Merge pull request #123 / (#123) 형태)
+
+실패 시 GitHub API(commits → pulls) 조회로 fallback
+
+base 브랜치가 main인 PR만 필터링하여 선택
+
+이 개선으로 PR이 여러 개 열려 있는 상황에서도 “이번 merge의 PR”을 정확히 특정할 수 있어,
+다른 PR의 ValidatedDeployId를 읽어 production 배포가 꼬이는 상황을 예방합니다.
 
 ### 7.4 JWT 인증 후 Production Quick Deploy
 
@@ -512,10 +531,11 @@ Workflow는 `--post-destructive-changes`를 validate에 포함할 수 있도록 
 원인:
 - squash merge, rebase merge 등으로 인해 커밋과 PR 연결이 끊겼거나
 - commit ↔ PR 매핑이 GitHub API에서 기대대로 나오지 않는 경우
+- 동시에 여러 PR이 존재하고 커밋이 여러 PR과 연관된 경우(중복 커밋/체리픽 등)
 
 대응:
-- 팀의 merge 전략을 통일(merge commit 권장 또는 squash 시에도 연결 가능한지 확인)
-- 필요하다면 “merge commit 메시지에 PR 번호를 포함”하고, 그 문자열로 PR을 파싱하는 대체 로직을 추가
+- 본 Workflow는 merge commit 메시지에서 PR 번호 파싱을 1순위로 사용하고, 실패 시에만 GitHub API 조회를 fallback으로 사용합니다.
+- 안정성을 극대화하려면, GitHub에서 PR merge 시 “Merge pull request” (Create a merge commit) 전략을 권장합니다.
 
 ### 10.2 ValidatedDeployId가 PR 코멘트에 없음
 
@@ -787,18 +807,32 @@ Note: This id will be used for sf project deploy quick on main merge.
 ### 13.6 merge 후 push에서 “커밋 SHA → PR 번호”를 역으로 찾는 로직
 
 push 이벤트는 PR 정보를 주지 않기 때문에, 커밋 SHA로 PR을 찾아야 합니다.
+이때 API 매핑이 흔들릴 수 있으므로, merge commit 메시지 파싱을 우선 적용하고, 실패 시 API를 fallback으로 사용합니다.
 
 ```yml
-- name: Find PR associated with this commit
+- name: Find PR associated with this commit (prefer merge commit message)
   id: pr
   run: |
+      set -euo pipefail
       SHA="${GITHUB_SHA}"
       REPO="${GITHUB_REPOSITORY}"
-      PR_NUMBER="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number' 2>/dev/null || true)"
-      if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+
+      MSG="$(git log -1 --pretty=%B "$SHA")"
+
+      # 1) merge commit 메시지에서 PR 번호 파싱
+      PR_NUMBER="$(echo "$MSG" | grep -Eo 'Merge pull request #[0-9]+' | head -n 1 | grep -Eo '[0-9]+' || true)"
+      # 또는 "(#123)" 패턴
+
+      # 2) 실패 시 GitHub API로 fallback (base 브랜치 필터)
+      if [ -z "${PR_NUMBER:-}" ]; then
+        PR_NUMBER="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[] | select(.base.ref=="main")][0].number' 2>/dev/null || true)"
+      fi
+
+      if [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; then
         echo "No PR found for commit $SHA. Aborting."
         exit 1
       fi
+
       echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 ```
 
