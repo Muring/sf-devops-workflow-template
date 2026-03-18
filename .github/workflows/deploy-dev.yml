@@ -1,0 +1,200 @@
+name: Dev Org Deploy (on push/PR to dev)
+
+on:
+    push:
+        branches: [dev]
+        paths-ignore:
+            - 'sfdx-project.json'
+            - 'README.md'
+    pull_request:
+        branches: [dev]
+
+concurrency:
+    group: deploy-dev-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+    pull-requests: write
+
+defaults:
+    run:
+        shell: bash
+
+jobs:
+    deploy_dev_org:
+        runs-on: ubuntu-latest
+        environment: dev
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Install Salesforce CLI
+              run: |
+                  npm i -g @salesforce/cli
+                  sf --version
+
+            - name: Install sfdx-git-delta plugin
+              run: echo y | sf plugins install sfdx-git-delta
+
+            - name: Resolve delta SHAs
+              id: sha
+              run: |
+                  set -euo pipefail
+                  if [ "${{ github.event_name }}" = "pull_request" ]; then
+                    FROM_SHA="${{ github.event.pull_request.base.sha }}"
+                    TO_SHA="${{ github.event.pull_request.head.sha }}"
+                  else
+                    FROM_SHA="${{ github.event.before }}"
+                    TO_SHA="${{ github.sha }}"
+                  fi
+
+                  echo "Event  : ${{ github.event_name }}"
+                  echo "FROM   : $FROM_SHA"
+                  echo "TO     : $TO_SHA"
+
+                  # Null SHA = 브랜치 최초 생성 (push origin dev 첫 번째)
+                  NULL_SHA="0000000000000000000000000000000000000000"
+                  if [ "$FROM_SHA" = "$NULL_SHA" ] || [ -z "$FROM_SHA" ] || [ -z "$TO_SHA" ]; then
+                    echo "FROM_SHA is null — branch newly created. Skipping deploy."
+                    echo "SKIP=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  echo "SKIP=false"          >> "$GITHUB_OUTPUT"
+                  echo "FROM_SHA=$FROM_SHA"  >> "$GITHUB_OUTPUT"
+                  echo "TO_SHA=$TO_SHA"      >> "$GITHUB_OUTPUT"
+
+            - name: Build delta package
+              id: delta
+              if: ${{ steps.sha.outputs.SKIP != 'true' }}
+              run: |
+                  set -euo pipefail
+                  FROM_SHA="${{ steps.sha.outputs.FROM_SHA }}"
+                  TO_SHA="${{ steps.sha.outputs.TO_SHA }}"
+
+                  rm -rf delta && mkdir -p delta
+
+                  sf sgd source delta \
+                    --from "$FROM_SHA" \
+                    --to "$TO_SHA" \
+                    --output-dir "delta" \
+                    --source-dir "force-app" \
+                    --generate-delta
+
+                  MANIFEST="delta/package/package.xml"
+                  DC="delta/destructiveChanges/destructiveChanges.xml"
+                  DC_DIR="delta/destructiveChanges"
+
+                  echo "=== delta tree ===" && ls -R delta || true
+
+                  if [ -f "$MANIFEST" ] && grep -q "<members>" "$MANIFEST"; then
+                    echo "HAS_CHANGES=true"  >> "$GITHUB_OUTPUT"
+                  else
+                    echo "HAS_CHANGES=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  if [ -f "$DC" ] && grep -q "<members>" "$DC"; then
+                    echo "HAS_DESTRUCTIVE=true"  >> "$GITHUB_OUTPUT"
+                  else
+                    echo "HAS_DESTRUCTIVE=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+                  echo "MANIFEST=$MANIFEST" >> "$GITHUB_OUTPUT"
+                  echo "DC=$DC"             >> "$GITHUB_OUTPUT"
+                  echo "DC_DIR=$DC_DIR"     >> "$GITHUB_OUTPUT"
+
+            - name: Create JWT key file
+              run: printf '%s' "${{ secrets.SF_JWT_KEY }}" > server.key
+
+            - name: Guard - ensure required secrets exist
+              run: |
+                  set -euo pipefail
+                  [ -n "${{ secrets.SF_CLIENT_ID }}" ]    || (echo "Missing SF_CLIENT_ID"    && exit 1)
+                  [ -n "${{ secrets.SF_USERNAME }}" ]     || (echo "Missing SF_USERNAME"     && exit 1)
+                  [ -n "${{ secrets.SF_INSTANCE_URL }}" ] || (echo "Missing SF_INSTANCE_URL" && exit 1)
+                  [ -n "${{ secrets.SF_JWT_KEY }}" ]      || (echo "Missing SF_JWT_KEY"      && exit 1)
+
+            - name: Auth to Dev Org (JWT)
+              run: |
+                  sf org login jwt \
+                    --client-id "${{ secrets.SF_CLIENT_ID }}" \
+                    --jwt-key-file server.key \
+                    --username "${{ secrets.SF_USERNAME }}" \
+                    --instance-url "${{ secrets.SF_INSTANCE_URL }}" \
+                    --alias ci-devorg \
+                    --set-default
+
+            - name: (Optional) Print org info for verification
+              run: |
+                  sf org display --target-org ci-devorg --json \
+                    | jq '.result.instanceUrl, .result.orgId, .result.username'
+
+            - name: Deploy delta to Dev Org
+              id: deploy
+              if: >
+                  steps.sha.outputs.SKIP != 'true' &&
+                  (steps.delta.outputs.HAS_CHANGES == 'true' || steps.delta.outputs.HAS_DESTRUCTIVE == 'true')
+              run: |
+                  set -euo pipefail
+                  MANIFEST="${{ steps.delta.outputs.MANIFEST }}"
+                  [ -f "$MANIFEST" ] || (echo "Manifest not found: $MANIFEST" && ls -R delta && exit 1)
+
+                  EXTRA=()
+                  if [ "${{ steps.delta.outputs.HAS_DESTRUCTIVE }}" = "true" ] && \
+                     [ -f "${{ steps.delta.outputs.DC }}" ]; then
+                    EXTRA+=(--post-destructive-changes "${{ steps.delta.outputs.DC }}")
+                  fi
+
+                  set +e
+                  OUT="$(sf project deploy start \
+                    --manifest "$MANIFEST" \
+                    --target-org ci-devorg \
+                    --test-level NoTestRun \
+                    --wait 30 \
+                    --json \
+                    "${EXTRA[@]}" 2>&1)"
+                  RC=$?
+                  set -e
+
+                  echo "$OUT" && echo "$OUT" | jq . || true
+
+                  DEPLOY_ID="$(echo "$OUT" | jq -r '.result.id // empty')"
+                  STATUS="$(echo "$OUT"    | jq -r '.result.status // empty')"
+                  echo "DEPLOY_ID=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+                  echo "STATUS=$STATUS"       >> "$GITHUB_OUTPUT"
+
+                  [ $RC -eq 0 ] || (echo "Deploy failed. Status: $STATUS" && exit 1)
+
+            - name: Comment deploy result on PR
+              if: github.event_name == 'pull_request'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  PR="${{ github.event.pull_request.number }}"
+                  SKIP="${{ steps.sha.outputs.SKIP }}"
+                  HAS_CHANGES="${{ steps.delta.outputs.HAS_CHANGES }}"
+                  HAS_DESTRUCTIVE="${{ steps.delta.outputs.HAS_DESTRUCTIVE }}"
+                  DEPLOY_ID="${{ steps.deploy.outputs.DEPLOY_ID }}"
+                  STATUS="${{ steps.deploy.outputs.STATUS }}"
+                  HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+                  if [ "$SKIP" = "true" ]; then
+                    BODY="Dev org deploy SKIPPED (branch newly created — no FROM baseline)."
+                  elif [ "$HAS_CHANGES" != "true" ] && [ "$HAS_DESTRUCTIVE" != "true" ]; then
+                    BODY="Dev org deploy SKIPPED — no metadata changes detected in delta."
+                  else
+                    BODY="$(printf "DevOrgDeployId: %s\nStatus: %s\nHeadSHA: %s\nNote: Direct deploy (NoTestRun) to dev org." \
+                      "$DEPLOY_ID" "$STATUS" "$HEAD_SHA")"
+                  fi
+
+                  gh pr comment "$PR" --body "$BODY"
