@@ -1,8 +1,8 @@
-name: PR Validate (main/develop)
+name: PR Validate (main/sandbox)
 
 on:
     pull_request:
-        branches: [main, develop]
+        branches: [main, sandbox]
 
 concurrency:
     group: pr-validate-integration-${{ github.event.pull_request.number }}
@@ -50,7 +50,7 @@ jobs:
                     echo "SF_CLIENT_ID=${{ secrets.SF_CLIENT_ID }}" >> "$GITHUB_ENV"
                     echo "SF_USERNAME=${{ secrets.SF_USERNAME }}" >> "$GITHUB_ENV"
                     echo "SF_INSTANCE_URL=${{ secrets.SF_INSTANCE_URL }}" >> "$GITHUB_ENV"
-                  elif [ "${{ github.base_ref }}" = "develop" ]; then
+                  elif [ "${{ github.base_ref }}" = "sandbox" ]; then
                     echo "ORG_ALIAS=ci-sandbox" >> "$GITHUB_ENV"
                     echo "SF_CLIENT_ID=${{ secrets.SF_SANDBOX_CLIENT_ID }}" >> "$GITHUB_ENV"
                     echo "SF_USERNAME=${{ secrets.SF_SANDBOX_USERNAME }}" >> "$GITHUB_ENV"

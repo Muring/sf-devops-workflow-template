@@ -1,8 +1,8 @@
-name: Sandbox Quick Deploy (on develop push)
+name: Sandbox Quick Deploy (on sandbox push)
 
 on:
     push:
-        branches: [develop]
+        branches: [sandbox]
         paths-ignore:
             - 'sfdx-project.json'
             - 'README.md'
